@@ -1,0 +1,103 @@
+#pragma kernel CSMain
+
+// Textures and parameters passed from C#
+Texture2D<float4> HeightMapTexture;
+SamplerState samplerHeightMapTexture; // Bilinear sampler if needed, but we do manual bicubic here
+
+uint Width;
+uint Height;
+float2 HeightMapOffset;
+float Resolution;
+
+float2 ChunkKey;
+uint OutputSize; // 513
+
+// Output buffer containing the raw 513x513 data
+RWStructuredBuffer<uint> OutputHeightBuffer;
+
+// Mitchell-Netravali weight function
+float MitchellNetravaliWeight(float x)
+{
+    x = abs(x);
+    float B = 1.0f / 3.0f;
+    float C = 1.0f / 3.0f;
+
+    if (x < 1.0f)
+    {
+        return ((12.0f - 9.0f * B - 6.0f * C) * x * x * x +
+            (-18.0f + 12.0f * B + 6.0f * C) * x * x +
+            (6.0f - 2.0f * B)) / 6.0f;
+    }
+    else if (x < 2.0f)
+    {
+        return ((-B - 6.0f * C) * x * x * x +
+            (6.0f * B + 30.0f * C) * x * x +
+            (-12.0f * B - 48.0f * C) * x +
+            (8.0f * B + 24.0f * C)) / 6.0f;
+    }
+    return 0.0f;
+}
+
+uint FetchPixel_Height(int x, int y)
+{
+    // Replicates your FetchPixel_Height logic using the texture directly
+    // Assuming the height data is in the red channel
+    float rawValue = HeightMapTexture[int2(x, y)].r;
+    return (uint)(rawValue * 65535.0f);
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= OutputSize || id.y >= OutputSize) return;
+
+    // --- REPLICATED C# LOGIC FOR 'pos' ---
+    float2 normPos = float2((float)id.x / (float)(OutputSize - 1), (float)id.y / (float)(OutputSize - 1));
+    float2 world_pos = (normPos + ChunkKey) * 500.0f;
+
+    // --- REPLICATED FetchSubPixel_Height ---
+    world_pos -= HeightMapOffset;
+
+    float2 size_texture = float2(Width, Height) * Resolution;
+    float2 pos0to1 = world_pos / size_texture;
+
+    uint result = 0;
+
+    // Out of bounds check
+    if (pos0to1.x >= 0.0f && pos0to1.x < 1.0f && pos0to1.y >= 0.0f && pos0to1.y < 1.0f)
+    {
+        float pixelX = pos0to1.x * Width;
+        float pixelY = pos0to1.y * Height;
+
+        int xCenter = floor(pixelX);
+        int yCenter = floor(pixelY);
+
+        float tx = pixelX - xCenter;
+        float ty = pixelY - yCenter;
+
+        float wX[4] = { MitchellNetravaliWeight(tx + 1.0f), MitchellNetravaliWeight(tx), MitchellNetravaliWeight(1.0f - tx), MitchellNetravaliWeight(2.0f - tx) };
+        float wY[4] = { MitchellNetravaliWeight(ty + 1.0f), MitchellNetravaliWeight(ty), MitchellNetravaliWeight(1.0f - ty), MitchellNetravaliWeight(2.0f - ty) };
+
+        float totalHeight = 0.0f;
+
+        for (int j = -1; j <= 2; j++)
+        {
+            int y = clamp(yCenter + j, 0, (int)Height - 1);
+            float weightY = wY[j + 1];
+
+            for (int i = -1; i <= 2; i++)
+            {
+                int x = clamp(xCenter + i, 0, (int)Width - 1);
+                float weightX = wX[i + 1];
+
+                totalHeight += FetchPixel_Height(x, y) * weightX * weightY;
+            }
+        }
+
+        result = (uint)clamp(round(totalHeight), 0.0f, 65535.0f);
+    }
+
+    // Write back to a 1D flat representation of our 513x513 grid
+    uint index = id.y * OutputSize + id.x;
+    OutputHeightBuffer[index] = result;
+}

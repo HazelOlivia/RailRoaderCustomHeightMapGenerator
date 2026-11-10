@@ -1,0 +1,59 @@
+#pragma kernel CSMain
+
+Texture2D<float4> BiomeMapTexture;
+
+uint Width;
+uint Height;
+float2 BiomeMapOffset;
+float Resolution;
+
+float2 ChunkKey;
+uint OutputSize;
+
+StructuredBuffer<float4> InspectorColors;
+StructuredBuffer<int> InspectorIDs;
+uint MapLength;
+
+RWStructuredBuffer<uint> OutputBiomeBuffer;
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= OutputSize || id.y >= OutputSize) return;
+
+    float2 normPos = float2((float)id.x / (float)(OutputSize - 1), (float)id.y / (float)(OutputSize - 1));
+    float2 world_pos = (normPos + ChunkKey) * 500.0f;
+
+    world_pos -= BiomeMapOffset;
+
+    float2 size_texture = float2(Width, Height) * Resolution;
+    float2 pos0to1 = world_pos / size_texture;
+
+    uint finalBiomeID = 0;
+
+    if (pos0to1.x >= 0.0f && pos0to1.x < 1.0f && pos0to1.y >= 0.0f && pos0to1.y < 1.0f)
+    {
+        // Round to nearest pixel coordinate
+        int texX = clamp((int)round(pos0to1.x * Width - 0.5f), 0, (int)Width - 1);
+        int texY = clamp((int)round(pos0to1.y * Height - 0.5f), 0, (int)Height - 1);
+
+        // Fetch exact raw color vector from texture
+        float4 sampledColor = BiomeMapTexture[int2(texX, texY)];
+
+        float minDistance = 99999.0f;
+        for (uint i = 0; i < MapLength; i++)
+        {
+            float3 diff = sampledColor.rgb - InspectorColors[i].rgb;
+            float distSq = dot(diff, diff);
+            
+            if (distSq < minDistance)
+            {
+                minDistance = distSq;
+                finalBiomeID = (uint)InspectorIDs[i];
+            }
+        }
+    }
+
+    uint index = id.y * OutputSize + id.x;
+    OutputBiomeBuffer[index] = finalBiomeID;
+}
